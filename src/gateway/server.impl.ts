@@ -209,12 +209,17 @@ export async function startGatewayServer(
     }
   }
 
+  // 加载配置文件
   const cfgAtStart = loadConfig();
+  // 检查诊断功能是否启用
   const diagnosticsEnabled = isDiagnosticsEnabled(cfgAtStart);
+  // 如果诊断功能已启用，启动诊断心跳
   if (diagnosticsEnabled) {
     startDiagnosticHeartbeat();
   }
+  // 设置SIGUSR1重启策略
   setGatewaySigusr1RestartPolicy({ allowExternal: cfgAtStart.commands?.restart === true });
+  // 初始化Sub Agent
   initSubagentRegistry();
   const defaultAgentId = resolveDefaultAgentId(cfgAtStart);
   const defaultWorkspaceDir = resolveAgentWorkspaceDir(cfgAtStart, defaultAgentId);

@@ -17,35 +17,53 @@ export type DeliveryContextSessionSource = {
   deliveryContext?: DeliveryContext;
 };
 
+/**
+ * 规范化投递上下文（DeliveryContext）对象
+ * 
+ * 此函数对输入的投递上下文进行清洗和规范化处理，确保字段格式一致并去除不必要的空白字符。
+ * 如果所有规范化后的字段都为空，则返回 undefined，避免创建无效的上下文对象。
+ * 
+ * @param context - 可选的原始投递上下文对象，可能包含各种格式的字段
+ * @returns 规范化后的投递上下文对象，如果所有字段都无效则返回 undefined
+ */
 export function normalizeDeliveryContext(context?: DeliveryContext): DeliveryContext | undefined {
   if (!context) {
     return undefined;
   }
+
   const channel =
     typeof context.channel === "string"
       ? (normalizeMessageChannel(context.channel) ?? context.channel.trim())
       : undefined;
+
+  // 去除空白字符
   const to = typeof context.to === "string" ? context.to.trim() : undefined;
   const accountId = normalizeAccountId(context.accountId);
   const threadId =
     typeof context.threadId === "number" && Number.isFinite(context.threadId)
       ? Math.trunc(context.threadId)
       : typeof context.threadId === "string"
-        ? context.threadId.trim()
-        : undefined;
+      ? context.threadId.trim()
+      :undefined;
   const normalizedThreadId =
     typeof threadId === "string" ? (threadId ? threadId : undefined) : threadId;
+    
   if (!channel && !to && !accountId && normalizedThreadId == null) {
     return undefined;
   }
+
+  // 构建规范化后的上下文对象
   const normalized: DeliveryContext = {
-    channel: channel || undefined,
+    channel: channel || undefined, // 确保明确设置为 undefined（而非空字符串）
     to: to || undefined,
     accountId,
   };
+
+  // 只有在 threadId 有值时才添加到对象中（可选字段）
   if (normalizedThreadId != null) {
     normalized.threadId = normalizedThreadId;
   }
+
   return normalized;
 }
 

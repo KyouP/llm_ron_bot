@@ -177,56 +177,92 @@ function loadRequesterSessionEntry(requesterSessionKey: string) {
   return { cfg, entry, canonicalKey };
 }
 
+/**
+ * 可能将子代理通知加入队列 TODO 未看
+ * 
+ * 这个函数是通知流程的智能分发器，根据系统配置和当前会话状态决定如何最佳处理子代理完成通知：
+ * 1. steered 直接转向嵌入式PI处理
+ * 2. queued 加入队列等待后续处理
+ * 3. none 不进行任何队列操作
+ * 
+ * 函数根据队列设置模式和会话活跃状态做出决策，确保通知以最合适的方式传递。
+ * 
+ * @param params 队列处理参数
+ * @param params.requesterSessionKey 请求方（主代理）的会话标识符
+ * @param params.triggerMessage 触发消息（子代理完成通知的具体内容）
+ * @param params.summaryLine 可选摘要行，用于队列中快速识别通知内容
+ * @param params.requesterOrigin 可选的请求来源投递上下文
+ * @returns 返回处理结果："steered"表示已转向处理，"queued"表示已加入队列，"none"表示未执行队列操作
+ */
 async function maybeQueueSubagentAnnounce(params: {
   requesterSessionKey: string;
   triggerMessage: string;
   summaryLine?: string;
   requesterOrigin?: DeliveryContext;
 }): Promise<"steered" | "queued" | "none"> {
+  // 加载请求方会话的配置和条目信息，用于后续决策
   const { cfg, entry } = loadRequesterSessionEntry(params.requesterSessionKey);
+  
+  // 解析请求方的标准存储键，用于唯一标识这个会话
   const canonicalKey = resolveRequesterStoreKey(cfg, params.requesterSessionKey);
+  
+  // 获取会话ID，如果没有会话ID则无法进行队列操作
   const sessionId = entry?.sessionId;
   if (!sessionId) {
-    return "none";
+    return "none"; // 无有效会话ID，无法进行队列操作
   }
-
+  
+  // 根据配置和会话信息解析队列设置，包括队列模式和策略
   const queueSettings = resolveQueueSettings({
     cfg,
-    channel: entry?.channel ?? entry?.lastChannel,
+    channel: entry?.channel ?? entry?.lastChannel, // 使用当前通道或最后使用的通道
     sessionEntry: entry,
   });
+  
+  // 检查当前嵌入式PI运行是否活跃（嵌入式PI可能是内部的处理器或代理）
   const isActive = isEmbeddedPiRunActive(sessionId);
-
+  
+  // 检查是否应该使用转向模式（steer模式直接将消息传递给嵌入式PI处理）
   const shouldSteer = queueSettings.mode === "steer" || queueSettings.mode === "steer-backlog";
   if (shouldSteer) {
+    // 尝试将消息转向嵌入式PI处理
     const steered = queueEmbeddedPiMessage(sessionId, params.triggerMessage);
     if (steered) {
-      return "steered";
+      return "steered"; // 成功转向处理
     }
   }
-
+  
+  // 检查是否应该使用跟进模式（followup模式将通知加入队列等待后续处理）
   const shouldFollowup =
     queueSettings.mode === "followup" ||
     queueSettings.mode === "collect" ||
-    queueSettings.mode === "steer-backlog" ||
-    queueSettings.mode === "interrupt";
+    queueSettings.mode === "steer-backlog" || // steer-backlog模式既可能转向也可能队列
+    queueSettings.mode === "interrupt"; // interrupt模式通常需要立即处理
+  
+  // 如果会话活跃且符合跟进条件，或者即使会话活跃但使用steer模式时
+  // 注意：steer模式在上面的shouldSteer条件中已经处理，这里可能是备用逻辑
   if (isActive && (shouldFollowup || queueSettings.mode === "steer")) {
+    // 解析通知的来源信息，优先使用传入的requesterOrigin，否则使用会话条目中的信息
     const origin = resolveAnnounceOrigin(entry, params.requesterOrigin);
+    
+    // 将通知加入队列
     enqueueAnnounce({
-      key: canonicalKey,
+      key: canonicalKey, // 使用标准存储键作为队列键
       item: {
-        prompt: params.triggerMessage,
-        summaryLine: params.summaryLine,
-        enqueuedAt: Date.now(),
-        sessionKey: canonicalKey,
-        origin,
+        prompt: params.triggerMessage, // 触发消息内容
+        summaryLine: params.summaryLine, // 可选的摘要行
+        enqueuedAt: Date.now(), // 入队时间戳
+        sessionKey: canonicalKey, // 会话标识符
+        origin, // 来源信息
       },
-      settings: queueSettings,
-      send: sendAnnounce,
+      settings: queueSettings, // 队列设置
+      send: sendAnnounce, // 发送函数引用
     });
-    return "queued";
+    
+    return "queued"; // 成功加入队列
   }
-
+  
+  // 不符合任何队列条件，返回"none"表示未执行队列操作
   return "none";
 }
 
@@ -345,6 +381,35 @@ export type SubagentRunOutcome = {
   error?: string;
 };
 
+/**
+ * 执行子代理任务完成后的通知流程
+ * 
+ * 当子代理任务完成时，此函数负责：
+ * 1. 等待任务完成（如果需要）
+ * 2. 收集任务结果和统计信息
+ * 3. 构建用户友好的通知消息
+ * 4. 通过队列或直接通知方式告知主代理
+ * 5. 执行会话清理操作
+ * 
+ * 这是一个关键的协调函数，用于确保子代理任务的闭环管理。
+ * 
+ * @param params 通知流程参数
+ * @param params.childSessionKey 子代理会话的唯一标识符
+ * @param params.childRunId 子代理运行的唯一ID
+ * @param params.requesterSessionKey 请求方（主代理）的会话标识符
+ * @param params.requesterOrigin 请求来源的投递上下文（用于消息路由）
+ * @param params.requesterDisplayKey 请求方的显示标识符（用于日志/调试）
+ * @param params.task 子代理执行的任务描述
+ * @param params.timeoutMs 等待任务完成的最大超时时间（毫秒）
+ * @param params.cleanup 清理策略："delete"删除会话，"keep"保留会话
+ * @param params.roundOneReply 可选的首轮回复，如果已存在则直接使用
+ * @param params.waitForCompletion 是否等待任务完成（默认等待）
+ * @param params.startedAt 任务开始时间戳（可选，用于统计）
+ * @param params.endedAt 任务结束时间戳（可选，用于统计）
+ * @param params.label 子代理的标签/名称（用于友好显示）
+ * @param params.outcome 任务结果（如果已知）
+ * @returns 返回布尔值，表示是否成功发送了通知
+ */
 export async function runSubagentAnnounceFlow(params: {
   childSessionKey: string;
   childRunId: string;
@@ -362,117 +427,138 @@ export async function runSubagentAnnounceFlow(params: {
   outcome?: SubagentRunOutcome;
 }): Promise<boolean> {
   let didAnnounce = false;
+  
   try {
+    // 规范化请求来源，确保投递上下文的格式一致性
     const requesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
-    let reply = params.roundOneReply;
+    let reply = params.roundOneReply; // 从参数获取第一轮回复（如果有）
     let outcome: SubagentRunOutcome | undefined = params.outcome;
+    
+    // 如果没有预先提供的回复且需要等待任务完成（默认行为），限制最大为60秒
     if (!reply && params.waitForCompletion !== false) {
       const waitMs = Math.min(params.timeoutMs, 60_000);
+      
+      // 调用agent等待子代理任务完成
       const wait = await callGateway<{
         status?: string;
         startedAt?: number;
         endedAt?: number;
         error?: string;
       }>({
-        method: "agent.wait",
+        method: "agent.wait", // 等待代理完成的方法
         params: {
           runId: params.childRunId,
           timeoutMs: waitMs,
         },
-        timeoutMs: waitMs + 2000,
+        timeoutMs: waitMs + 2000, // 网关调用超时（比等待时间多2秒）
       });
+      
       const waitError = typeof wait?.error === "string" ? wait.error : undefined;
+      
       if (wait?.status === "timeout") {
-        outcome = { status: "timeout" };
+        outcome = { status: "timeout" }; // 任务超时
       } else if (wait?.status === "error") {
-        outcome = { status: "error", error: waitError };
+        outcome = { status: "error", error: waitError }; // 任务出错
       } else if (wait?.status === "ok") {
-        outcome = { status: "ok" };
+        outcome = { status: "ok" }; // 任务成功完成
       }
+      
       if (typeof wait?.startedAt === "number" && !params.startedAt) {
         params.startedAt = wait.startedAt;
       }
       if (typeof wait?.endedAt === "number" && !params.endedAt) {
         params.endedAt = wait.endedAt;
       }
+      
+      // 双重检查：如果等待状态是超时但尚未设置结果，设置为超时
       if (wait?.status === "timeout") {
         if (!outcome) {
           outcome = { status: "timeout" };
         }
       }
+      
+      // 读取SubAgent会话的最新回复
       reply = await readLatestAssistantReply({
         sessionKey: params.childSessionKey,
       });
     }
-
+    
+    // 如果还没有回复（无论是从参数还是等待后），再次尝试读取SubAgent
     if (!reply) {
       reply = await readLatestAssistantReply({
         sessionKey: params.childSessionKey,
       });
     }
-
+    
     if (!outcome) {
       outcome = { status: "unknown" };
     }
-
-    // Build stats
+    
+    // 构建统计信息行：包含令牌使用、时间等统计信息
     const statsLine = await buildSubagentStatsLine({
       sessionKey: params.childSessionKey,
       startedAt: params.startedAt,
       endedAt: params.endedAt,
     });
-
-    // Build status label
+    
     const statusLabel =
       outcome.status === "ok"
-        ? "completed successfully"
+        ? "completed successfully" // 成功完成
         : outcome.status === "timeout"
-          ? "timed out"
+          ? "timed out" // 超时
           : outcome.status === "error"
-            ? `failed: ${outcome.error || "unknown error"}`
-            : "finished with unknown status";
-
-    // Build instructional message for main agent
-    const taskLabel = params.label || params.task || "background task";
+            ? `failed: ${outcome.error || "unknown error"}` // 失败，包含错误信息
+            : "finished with unknown status"; // 未知状态
+    
+    // 构建用于触发主代理的通知消息
+    const taskLabel = params.label || params.task || "background task"; // 任务标签
     const triggerMessage = [
       `A background task "${taskLabel}" just ${statusLabel}.`,
-      "",
-      "Findings:",
-      reply || "(no output)",
+      "", // 空行分隔
+      "Findings:", // 发现/结果部分
+      reply || "(no output)", // 实际回复内容，没有则显示占位符
       "",
       statsLine,
       "",
-      "Summarize this naturally for the user. Keep it brief (1-2 sentences). Flow it into the conversation naturally.",
-      "Do not mention technical details like tokens, stats, or that this was a background task.",
-      "You can respond with NO_REPLY if no announcement is needed (e.g., internal task with no user-facing result).",
+      // 给主agent的指令：如何向用户呈现这些信息
+      // "Summarize this naturally for the user. Keep it brief (1-2 sentences). Flow it into the conversation naturally.",
+      // "Do not mention technical details like tokens, stats, or that this was a background task.",
+      // "You can respond with NO_REPLY if no announcement is needed (e.g., internal task with no user-facing result).",
+    "请为用户自然地总结以下内容。保持简洁（1-2句话）。自然地融入对话流程中。",
+    "不需要提及技术细节，例如令牌数量、统计数据或这是一个后台任务。",
+    "如果不需要进行通知（例如，没有用户可见结果的内部任务），你可以用'NO_REPLY'来回应。",
     ].join("\n");
-
+    
+    // 尝试将通知加入队列（异步处理，避免阻塞）
     const queued = await maybeQueueSubagentAnnounce({
       requesterSessionKey: params.requesterSessionKey,
       triggerMessage,
       summaryLine: taskLabel,
       requesterOrigin,
     });
-    if (queued === "steered") {
+    
+    // 检查队列处理结果，如果成功直接返回
+    if (queued === "steered" || queued === "queued") {
       didAnnounce = true;
       return true;
     }
-    if (queued === "queued") {
-      didAnnounce = true;
-      return true;
-    }
-
-    // Send to main agent - it will respond in its own voice
+    
+    /** 
+    * 队列处理失败，直接向主代理发送消息
+    */
+   
+    // 如果没有来源信息，从请求方会话中加载
     let directOrigin = requesterOrigin;
     if (!directOrigin) {
       const { entry } = loadRequesterSessionEntry(params.requesterSessionKey);
       directOrigin = deliveryContextFromSession(entry);
     }
+    
     await callGateway({
-      method: "agent",
+      method: "agent", // 调用代理方法
       params: {
         sessionKey: params.requesterSessionKey,
-        message: triggerMessage,
+        message: triggerMessage, // 触发消息
         deliver: true,
         channel: directOrigin?.channel,
         accountId: directOrigin?.accountId,
@@ -483,38 +569,39 @@ export async function runSubagentAnnounceFlow(params: {
             : undefined,
         idempotencyKey: crypto.randomUUID(),
       },
-      expectFinal: true,
-      timeoutMs: 60_000,
+      expectFinal: true, // 期望最终响应（非流式） TODO 检查参数使用
+      timeoutMs: 60_000, // 60秒超时
     });
-
+    
     didAnnounce = true;
   } catch (err) {
     defaultRuntime.error?.(`Subagent announce failed: ${String(err)}`);
-    // Best-effort follow-ups; ignore failures to avoid breaking the caller response.
   } finally {
-    // Patch label after all writes complete
     if (params.label) {
       try {
         await callGateway({
-          method: "sessions.patch",
+          method: "sessions.patch", // 会话补丁方法
           params: { key: params.childSessionKey, label: params.label },
-          timeoutMs: 10_000,
+          timeoutMs: 10_000, // 10秒超时
         });
-      } catch {
-        // Best-effort
+      } catch (err) {
+        defaultRuntime.error?.(`Subagent sessions.patch failed: ${String(err)}`);
       }
     }
+    
+    // 如果清理策略是删除，尝试删除会话
     if (params.cleanup === "delete") {
       try {
         await callGateway({
-          method: "sessions.delete",
+          method: "sessions.delete", // 删除会话方法
           params: { key: params.childSessionKey, deleteTranscript: true },
-          timeoutMs: 10_000,
+          timeoutMs: 10_000, // 10秒超时
         });
-      } catch {
-        // ignore
+      } catch (err) {
+        defaultRuntime.error?.(`Subagent sessions.delete failed: ${String(err)}`);
       }
     }
   }
+  
   return didAnnounce;
 }
