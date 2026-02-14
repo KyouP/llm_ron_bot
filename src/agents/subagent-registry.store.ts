@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { SubagentRunRecord } from "./subagent-registry.js";
-import { STATE_DIR } from "../config/paths.js";
+import { resolveStateDir } from "../config/paths.js";
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.js";
 
@@ -30,7 +30,7 @@ type LegacySubagentRunRecord = PersistedSubagentRunRecord & {
 };
 
 export function resolveSubagentRegistryPath(): string {
-  return path.join(STATE_DIR, "subagents", "runs.json");
+  return path.join(resolveStateDir(), "subagents", "runs.json");
 }
 
 /**
@@ -75,10 +75,10 @@ const isLegacy = record.version === 1; // 检测是否为旧版本数据
 let migrated = false; // 标记是否有数据被迁移
 
 // 遍历所有原始运行记录
-for (const [runId, entry] of Object.entries(runsRaw)) {
-  if (!entry || typeof entry !== "object") {
-    continue;
-  }
+  for (const [runId, entry] of Object.entries(runsRaw)) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
   
   // 类型断言：假设entry符合旧版记录结构
   const typed = entry as LegacySubagentRunRecord;
@@ -89,40 +89,39 @@ for (const [runId, entry] of Object.entries(runsRaw)) {
   
   // 处理完成时间字段迁移
   // 旧版本使用announceCompletedAt，新版本使用cleanupCompletedAt
-  const legacyCompletedAt = isLegacy && typeof typed.announceCompletedAt === "number"
-    ? typed.announceCompletedAt  // 旧版本字段
-    : undefined;
-  
-  // 优先使用新字段，回退到旧字段（如果存在）
-  const cleanupCompletedAt = typeof typed.cleanupCompletedAt === "number" 
-    ? typed.cleanupCompletedAt    // 新版本字段
-    : legacyCompletedAt;          // 回退到旧版本字段
-  
-  // 处理清理状态字段迁移
-  // 旧版本逻辑更复杂，需要推导清理状态
-  const cleanupHandled = typeof typed.cleanupHandled === "boolean"
-    ? typed.cleanupHandled  //
-    : isLegacy
-      ? Boolean(typed.announceHandled ?? cleanupCompletedAt)  // 旧版本推导逻辑
-      : undefined;  // 非旧版本且没有新字段则为undefined
-  
+    const legacyCompletedAt =
+      isLegacy && typeof typed.announceCompletedAt === "number"
+        ? typed.announceCompletedAt  // 旧版本字段
+        : undefined;
+    // 优先使用新字段，回退到旧字段（如果存在）
+    const cleanupCompletedAt =
+      typeof typed.cleanupCompletedAt === "number" ? typed.cleanupCompletedAt : legacyCompletedAt;
+    // 处理清理状态字段迁移
+    // 旧版本逻辑更复杂，需要推导清理状态
+    const cleanupHandled =
+      typeof typed.cleanupHandled === "boolean"
+        ? typed.cleanupHandled
+        : isLegacy
+          ? Boolean(typed.announceHandled ?? cleanupCompletedAt)  // 旧版本推导逻辑
+          : undefined;  // 非旧版本且没有新字段则为undefined
+
   // 规范化请求来源信息
   // 旧版本使用分立的channel和accountId，新版本统一为requesterOrigin
-  const requesterOrigin = normalizeDeliveryContext(
-    typed.requesterOrigin ?? {
-      channel: typeof typed.requesterChannel === "string" ? typed.requesterChannel : undefined,
-      accountId: typeof typed.requesterAccountId === "string" ? typed.requesterAccountId : undefined,
-    },
-  );
-  
-  // 移除不再需要的旧字段，避免数据污染
-  const {
+    const requesterOrigin = normalizeDeliveryContext(
+      typed.requesterOrigin ?? {
+        channel: typeof typed.requesterChannel === "string" ? typed.requesterChannel : undefined,
+        accountId:
+          typeof typed.requesterAccountId === "string" ? typed.requesterAccountId : undefined,
+      },
+    );
+    // 移除不再需要的旧字段，避免数据污染
+    const {
     announceCompletedAt: _announceCompletedAt,  // 旧版完成时间
     announceHandled: _announceHandled,          // 旧版处理状态
     requesterChannel: _channel,                  // 旧版通道字段
     requesterAccountId: _accountId,              // 旧版账户ID
     ...rest  // 保留其他所有字段
-  } = typed;
+    } = typed;
   
   // 构建新的记录对象
   out.set(runId, {
@@ -130,23 +129,23 @@ for (const [runId, entry] of Object.entries(runsRaw)) {
     requesterOrigin,          // 规范化的请求来源
     cleanupCompletedAt,       // 统一后的完成时间
     cleanupHandled,           // 统一后的处理状态
-  });
+    });
   
-  // 标记发生了数据迁移
-  if (isLegacy) {
-    migrated = true;
+    // 标记发生了数据迁移
+    if (isLegacy) {
+      migrated = true;
+    }
   }
-}
 
-// 如果发生了迁移，保存到磁盘
-if (migrated) {
-  try {
-    saveSubagentRegistryToDisk(out);
+  // 如果发生了迁移，保存到磁盘
+  if (migrated) {
+    try {
+      saveSubagentRegistryToDisk(out);
   } catch (error) {
     // 忽略迁移保存失败，避免阻塞主流程
     console.warn('Migration save failed:', error)
+    }
   }
-}
   return out;
 }
 

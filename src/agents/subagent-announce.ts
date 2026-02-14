@@ -6,9 +6,11 @@ import {
   loadSessionStore,
   resolveAgentIdFromSessionKey,
   resolveMainSessionKey,
+  resolveSessionFilePath,
   resolveStorePath,
 } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
+import { formatDurationCompact } from "../infra/format-time/format-duration.ts";
 import { normalizeMainKey } from "../routing/session-key.js";
 import { defaultRuntime } from "../runtime.js";
 import {
@@ -17,26 +19,13 @@ import {
   mergeDeliveryContext,
   normalizeDeliveryContext,
 } from "../utils/delivery-context.js";
-import { isEmbeddedPiRunActive, queueEmbeddedPiMessage } from "./pi-embedded.js";
+import {
+  isEmbeddedPiRunActive,
+  queueEmbeddedPiMessage,
+  waitForEmbeddedPiRunEnd,
+} from "./pi-embedded.js";
 import { type AnnounceQueueItem, enqueueAnnounce } from "./subagent-announce-queue.js";
 import { readLatestAssistantReply } from "./tools/agent-step.js";
-
-function formatDurationShort(valueMs?: number) {
-  if (!valueMs || !Number.isFinite(valueMs) || valueMs <= 0) {
-    return undefined;
-  }
-  const totalSeconds = Math.round(valueMs / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `${hours}h${minutes}m`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m${seconds}s`;
-  }
-  return `${seconds}s`;
-}
 
 function formatTokenCount(value?: number) {
   if (!value || !Number.isFinite(value)) {
@@ -202,7 +191,6 @@ async function maybeQueueSubagentAnnounce(params: {
 }): Promise<"steered" | "queued" | "none"> {
   // 加载请求方会话的配置和条目信息，用于后续决策
   const { cfg, entry } = loadRequesterSessionEntry(params.requesterSessionKey);
-  
   // 解析请求方的标准存储键，用于唯一标识这个会话
   const canonicalKey = resolveRequesterStoreKey(cfg, params.requesterSessionKey);
   
@@ -211,17 +199,17 @@ async function maybeQueueSubagentAnnounce(params: {
   if (!sessionId) {
     return "none"; // 无有效会话ID，无法进行队列操作
   }
-  
+
   // 根据配置和会话信息解析队列设置，包括队列模式和策略
   const queueSettings = resolveQueueSettings({
     cfg,
     channel: entry?.channel ?? entry?.lastChannel, // 使用当前通道或最后使用的通道
     sessionEntry: entry,
   });
-  
+
   // 检查当前嵌入式PI运行是否活跃（嵌入式PI可能是内部的处理器或代理）
   const isActive = isEmbeddedPiRunActive(sessionId);
-  
+
   // 检查是否应该使用转向模式（steer模式直接将消息传递给嵌入式PI处理）
   const shouldSteer = queueSettings.mode === "steer" || queueSettings.mode === "steer-backlog";
   if (shouldSteer) {
@@ -231,7 +219,7 @@ async function maybeQueueSubagentAnnounce(params: {
       return "steered"; // 成功转向处理
     }
   }
-  
+
   // 检查是否应该使用跟进模式（followup模式将通知加入队列等待后续处理）
   const shouldFollowup =
     queueSettings.mode === "followup" ||
@@ -244,7 +232,7 @@ async function maybeQueueSubagentAnnounce(params: {
   if (isActive && (shouldFollowup || queueSettings.mode === "steer")) {
     // 解析通知的来源信息，优先使用传入的requesterOrigin，否则使用会话条目中的信息
     const origin = resolveAnnounceOrigin(entry, params.requesterOrigin);
-    
+
     // 将通知加入队列
     enqueueAnnounce({
       key: canonicalKey, // 使用标准存储键作为队列键
@@ -261,7 +249,7 @@ async function maybeQueueSubagentAnnounce(params: {
     
     return "queued"; // 成功加入队列
   }
-  
+
   // 不符合任何队列条件，返回"none"表示未执行队列操作
   return "none";
 }
@@ -277,8 +265,16 @@ async function buildSubagentStatsLine(params: {
   });
 
   const sessionId = entry?.sessionId;
-  const transcriptPath =
-    sessionId && storePath ? path.join(path.dirname(storePath), `${sessionId}.jsonl`) : undefined;
+  let transcriptPath: string | undefined;
+  if (sessionId && storePath) {
+    try {
+      transcriptPath = resolveSessionFilePath(sessionId, entry, {
+        sessionsDir: path.dirname(storePath),
+      });
+    } catch {
+      transcriptPath = undefined;
+    }
+  }
 
   const input = entry?.inputTokens;
   const output = entry?.outputTokens;
@@ -299,7 +295,7 @@ async function buildSubagentStatsLine(params: {
       : undefined;
 
   const parts: string[] = [];
-  const runtime = formatDurationShort(runtimeMs);
+  const runtime = formatDurationCompact(runtimeMs);
   parts.push(`runtime ${runtime ?? "n/a"}`);
   if (typeof total === "number") {
     const inputText = typeof input === "number" ? formatTokenCount(input) : "n/a";
@@ -322,6 +318,36 @@ async function buildSubagentStatsLine(params: {
   }
 
   return `Stats: ${parts.join(" \u2022 ")}`;
+}
+
+function loadSessionEntryByKey(sessionKey: string) {
+  const cfg = loadConfig();
+  const agentId = resolveAgentIdFromSessionKey(sessionKey);
+  const storePath = resolveStorePath(cfg.session?.store, { agentId });
+  const store = loadSessionStore(storePath);
+  return store[sessionKey];
+}
+
+async function readLatestAssistantReplyWithRetry(params: {
+  sessionKey: string;
+  initialReply?: string;
+  maxWaitMs: number;
+}): Promise<string | undefined> {
+  const RETRY_INTERVAL_MS = 100;
+  let reply = params.initialReply?.trim() ? params.initialReply : undefined;
+  if (reply) {
+    return reply;
+  }
+
+  const deadline = Date.now() + Math.max(0, Math.min(params.maxWaitMs, 15_000));
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, RETRY_INTERVAL_MS));
+    const latest = await readLatestAssistantReply({ sessionKey: params.sessionKey });
+    if (latest?.trim()) {
+      return latest;
+    }
+  }
+  return reply;
 }
 
 export function buildSubagentSystemPrompt(params: {
@@ -359,10 +385,10 @@ export function buildSubagentSystemPrompt(params: {
     "",
     "## What You DON'T Do",
     "- NO user conversations (that's main agent's job)",
-    "- NO external messages (email, tweets, etc.) unless explicitly tasked",
+    "- NO external messages (email, tweets, etc.) unless explicitly tasked with a specific recipient/channel",
     "- NO cron jobs or persistent state",
     "- NO pretending to be the main agent",
-    "- NO using the `message` tool directly",
+    "- Only use the `message` tool when explicitly instructed to contact a specific external recipient; otherwise return plain text and let the main agent deliver it",
     "",
     "## Session Context",
     params.label ? `- Label: ${params.label}` : undefined,
@@ -380,6 +406,8 @@ export type SubagentRunOutcome = {
   status: "ok" | "error" | "timeout" | "unknown";
   error?: string;
 };
+
+export type SubagentAnnounceType = "subagent task" | "cron job";
 
 /**
  * 执行子代理任务完成后的通知流程
@@ -408,6 +436,7 @@ export type SubagentRunOutcome = {
  * @param params.endedAt 任务结束时间戳（可选，用于统计）
  * @param params.label 子代理的标签/名称（用于友好显示）
  * @param params.outcome 任务结果（如果已知）
+ * @param params.announceType 通知类型（默认"subagent task"）
  * @returns 返回布尔值，表示是否成功发送了通知
  */
 export async function runSubagentAnnounceFlow(params: {
@@ -425,18 +454,42 @@ export async function runSubagentAnnounceFlow(params: {
   endedAt?: number;
   label?: string;
   outcome?: SubagentRunOutcome;
+  announceType?: SubagentAnnounceType;
 }): Promise<boolean> {
   let didAnnounce = false;
-  
+  let shouldDeleteChildSession = params.cleanup === "delete";
   try {
     // 规范化请求来源，确保投递上下文的格式一致性
     const requesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
+    const childSessionId = (() => {
+      const entry = loadSessionEntryByKey(params.childSessionKey);
+      return typeof entry?.sessionId === "string" && entry.sessionId.trim()
+        ? entry.sessionId.trim()
+        : undefined;
+    })();
+    // 如果没有预先提供的回复且需要等待任务完成（默认行为），限制最大为120秒
+    const settleTimeoutMs = Math.min(Math.max(params.timeoutMs, 1), 120_000);
     let reply = params.roundOneReply; // 从参数获取第一轮回复（如果有）
     let outcome: SubagentRunOutcome | undefined = params.outcome;
-    
-    // 如果没有预先提供的回复且需要等待任务完成（默认行为），限制最大为60秒
+    // Lifecycle "end" can arrive before auto-compaction retries finish. If the
+    // subagent is still active, wait for the embedded run to fully settle.
+    // 生命周期“结束”可能在自动压缩重试完成之前到达。如果子代理仍处于活动状态，请等待嵌入运行完全稳定。
+    if (childSessionId && isEmbeddedPiRunActive(childSessionId)) {
+      const settled = await waitForEmbeddedPiRunEnd(childSessionId, settleTimeoutMs);
+      if (!settled && isEmbeddedPiRunActive(childSessionId)) {
+        // The child run is still active (e.g., compaction retry still in progress).
+        // Defer announcement so we don't report stale/partial output.
+        // Keep the child session so output is not lost while the run is still active.
+        // 子运行（例如压缩重试）仍在进行中。
+        // 推迟通知，以避免报告过时或不完整的输出。
+        // 保留子会话，以便在运行仍处于活动状态时不会丢失输出。
+        shouldDeleteChildSession = false;
+        return false;
+      }
+    }
+
     if (!reply && params.waitForCompletion !== false) {
-      const waitMs = Math.min(params.timeoutMs, 60_000);
+      const waitMs = settleTimeoutMs;
       
       // 调用agent等待子代理任务完成
       const wait = await callGateway<{
@@ -452,9 +505,7 @@ export async function runSubagentAnnounceFlow(params: {
         },
         timeoutMs: waitMs + 2000, // 网关调用超时（比等待时间多2秒）
       });
-      
       const waitError = typeof wait?.error === "string" ? wait.error : undefined;
-      
       if (wait?.status === "timeout") {
         outcome = { status: "timeout" }; // 任务超时
       } else if (wait?.status === "error") {
@@ -462,45 +513,55 @@ export async function runSubagentAnnounceFlow(params: {
       } else if (wait?.status === "ok") {
         outcome = { status: "ok" }; // 任务成功完成
       }
-      
       if (typeof wait?.startedAt === "number" && !params.startedAt) {
         params.startedAt = wait.startedAt;
       }
       if (typeof wait?.endedAt === "number" && !params.endedAt) {
         params.endedAt = wait.endedAt;
       }
-      
       // 双重检查：如果等待状态是超时但尚未设置结果，设置为超时
       if (wait?.status === "timeout") {
         if (!outcome) {
           outcome = { status: "timeout" };
         }
       }
-      
       // 读取SubAgent会话的最新回复
-      reply = await readLatestAssistantReply({
-        sessionKey: params.childSessionKey,
-      });
+      reply = await readLatestAssistantReply({ sessionKey: params.childSessionKey });
     }
-    
+
     // 如果还没有回复（无论是从参数还是等待后），再次尝试读取SubAgent
     if (!reply) {
-      reply = await readLatestAssistantReply({
+      reply = await readLatestAssistantReply({ sessionKey: params.childSessionKey });
+    }
+
+    if (!reply?.trim()) {
+      reply = await readLatestAssistantReplyWithRetry({
         sessionKey: params.childSessionKey,
+        initialReply: reply,
+        maxWaitMs: params.timeoutMs,
       });
     }
-    
+
+    if (!reply?.trim() && childSessionId && isEmbeddedPiRunActive(childSessionId)) {
+      // Avoid announcing "(no output)" while the child run is still producing output.
+      // 避免在子运行仍在产生输出时报告“(no output)”。
+      shouldDeleteChildSession = false;
+      return false;
+    }
+
     if (!outcome) {
       outcome = { status: "unknown" };
     }
-    
+
+    // Build stats
     // 构建统计信息行：包含令牌使用、时间等统计信息
     const statsLine = await buildSubagentStatsLine({
       sessionKey: params.childSessionKey,
       startedAt: params.startedAt,
       endedAt: params.endedAt,
     });
-    
+
+    // Build status label
     const statusLabel =
       outcome.status === "ok"
         ? "completed successfully" // 成功完成
@@ -509,11 +570,13 @@ export async function runSubagentAnnounceFlow(params: {
           : outcome.status === "error"
             ? `failed: ${outcome.error || "unknown error"}` // 失败，包含错误信息
             : "finished with unknown status"; // 未知状态
-    
+
+    // Build instructional message for main agent
     // 构建用于触发主代理的通知消息
-    const taskLabel = params.label || params.task || "background task"; // 任务标签
+    const announceType = params.announceType ?? "subagent task"; // 任务标签
+    const taskLabel = params.label || params.task || "task";
     const triggerMessage = [
-      `A background task "${taskLabel}" just ${statusLabel}.`,
+      `A ${announceType} "${taskLabel}" just ${statusLabel}.`,
       "", // 空行分隔
       "Findings:", // 发现/结果部分
       reply || "(no output)", // 实际回复内容，没有则显示占位符
@@ -522,10 +585,10 @@ export async function runSubagentAnnounceFlow(params: {
       "",
       // 给主agent的指令：如何向用户呈现这些信息
       // "Summarize this naturally for the user. Keep it brief (1-2 sentences). Flow it into the conversation naturally.",
-      // "Do not mention technical details like tokens, stats, or that this was a background task.",
+      // `Do not mention technical details like tokens, stats, or that this was a ${announceType}.`,
       // "You can respond with NO_REPLY if no announcement is needed (e.g., internal task with no user-facing result).",
     "请为用户自然地总结以下内容。保持简洁（1-2句话）。自然地融入对话流程中。",
-    "不需要提及技术细节，例如令牌数量、统计数据或这是一个后台任务。",
+    "不需要提及技术细节，例如令牌数量、统计数据或这是一个${announceType}。",
     "如果不需要进行通知（例如，没有用户可见结果的内部任务），你可以用'NO_REPLY'来回应。",
     ].join("\n");
     
@@ -536,24 +599,23 @@ export async function runSubagentAnnounceFlow(params: {
       summaryLine: taskLabel,
       requesterOrigin,
     });
-    
+
     // 检查队列处理结果，如果成功直接返回
-    if (queued === "steered" || queued === "queued") {
+      if (queued === "steered" || queued === "queued") {
       didAnnounce = true;
       return true;
     }
-    
+
     /** 
     * 队列处理失败，直接向主代理发送消息
     */
-   
+    // Send to main agent - it will respond in its own voice
     // 如果没有来源信息，从请求方会话中加载
     let directOrigin = requesterOrigin;
     if (!directOrigin) {
       const { entry } = loadRequesterSessionEntry(params.requesterSessionKey);
       directOrigin = deliveryContextFromSession(entry);
     }
-    
     await callGateway({
       method: "agent", // 调用代理方法
       params: {
@@ -572,11 +634,13 @@ export async function runSubagentAnnounceFlow(params: {
       expectFinal: true, // 期望最终响应（非流式） TODO 检查参数使用
       timeoutMs: 60_000, // 60秒超时
     });
-    
+
     didAnnounce = true;
   } catch (err) {
     defaultRuntime.error?.(`Subagent announce failed: ${String(err)}`);
+    // Best-effort follow-ups; ignore failures to avoid breaking the caller response.
   } finally {
+    // Patch label after all writes complete
     if (params.label) {
       try {
         await callGateway({
@@ -588,9 +652,8 @@ export async function runSubagentAnnounceFlow(params: {
         defaultRuntime.error?.(`Subagent sessions.patch failed: ${String(err)}`);
       }
     }
-    
     // 如果清理策略是删除，尝试删除会话
-    if (params.cleanup === "delete") {
+    if (shouldDeleteChildSession) {
       try {
         await callGateway({
           method: "sessions.delete", // 删除会话方法
@@ -602,6 +665,5 @@ export async function runSubagentAnnounceFlow(params: {
       }
     }
   }
-  
   return didAnnounce;
 }

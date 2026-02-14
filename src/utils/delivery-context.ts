@@ -30,12 +30,10 @@ export function normalizeDeliveryContext(context?: DeliveryContext): DeliveryCon
   if (!context) {
     return undefined;
   }
-
   const channel =
     typeof context.channel === "string"
       ? (normalizeMessageChannel(context.channel) ?? context.channel.trim())
       : undefined;
-
   // 去除空白字符
   const to = typeof context.to === "string" ? context.to.trim() : undefined;
   const accountId = normalizeAccountId(context.accountId);
@@ -43,27 +41,23 @@ export function normalizeDeliveryContext(context?: DeliveryContext): DeliveryCon
     typeof context.threadId === "number" && Number.isFinite(context.threadId)
       ? Math.trunc(context.threadId)
       : typeof context.threadId === "string"
-      ? context.threadId.trim()
-      :undefined;
+        ? context.threadId.trim()
+        : undefined;
   const normalizedThreadId =
     typeof threadId === "string" ? (threadId ? threadId : undefined) : threadId;
-    
   if (!channel && !to && !accountId && normalizedThreadId == null) {
     return undefined;
   }
-
   // 构建规范化后的上下文对象
   const normalized: DeliveryContext = {
     channel: channel || undefined, // 确保明确设置为 undefined（而非空字符串）
     to: to || undefined,
     accountId,
   };
-
   // 只有在 threadId 有值时才添加到对象中（可选字段）
   if (normalizedThreadId != null) {
     normalized.threadId = normalizedThreadId;
   }
-
   return normalized;
 }
 

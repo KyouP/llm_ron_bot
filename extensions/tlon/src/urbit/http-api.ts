@@ -30,8 +30,8 @@ export function ensureUrbitConnectPatched() {
       (this as unknown as { cookie?: string }).cookie = cookie;
     }
 
-    await (this).getShipName();
-    await (this).getOurName();
+    await (this as typeof Urbit.prototype).getShipName();
+    await (this as typeof Urbit.prototype).getOurName();
   };
 }
 

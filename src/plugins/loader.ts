@@ -14,6 +14,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveUserPath } from "../utils.js";
 import { clearPluginCommands } from "./commands.js";
 import {
+  applyTestPluginDefaults,
   normalizePluginsConfig,
   resolveEnableState,
   resolveMemorySlotDecision,
@@ -45,14 +46,16 @@ const defaultLogger = () => createSubsystemLogger("plugins");
 const resolvePluginSdkAlias = (): string | null => {
   try {
     const modulePath = fileURLToPath(import.meta.url);
-    const isDistRuntime = modulePath.split(path.sep).includes("dist");
-    const preferDist = process.env.VITEST || process.env.NODE_ENV === "test" || isDistRuntime;
+    const isProduction = process.env.NODE_ENV === "production";
+    const isTest = process.env.VITEST || process.env.NODE_ENV === "test";
     let cursor = path.dirname(modulePath);
     for (let i = 0; i < 6; i += 1) {
       const srcCandidate = path.join(cursor, "src", "plugin-sdk", "index.ts");
       const distCandidate = path.join(cursor, "dist", "plugin-sdk", "index.js");
-      const orderedCandidates = preferDist
-        ? [distCandidate, srcCandidate]
+      const orderedCandidates = isProduction
+        ? isTest
+          ? [distCandidate, srcCandidate]
+          : [distCandidate]
         : [srcCandidate, distCandidate];
       for (const candidate of orderedCandidates) {
         if (fs.existsSync(candidate)) {
@@ -174,7 +177,11 @@ function pushDiagnostics(diagnostics: PluginDiagnostic[], append: PluginDiagnost
  * @returns 
  */
 export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegistry {
-  const cfg = options.config ?? {};
+  // Test env: default-disable plugins unless explicitly configured.
+  // This keeps unit/gateway suites fast and avoids loading heavyweight plugin deps by accident.
+  // 测试环境：默认禁用插件，除非显式配置。
+  // 这可以保持单元/网关测试套件的快速运行，并避免意外加载重量级插件依赖。
+  const cfg = applyTestPluginDefaults(options.config ?? {}, process.env);
   const logger = options.logger ?? defaultLogger();
   const validateOnly = options.mode === "validate";
   const normalized = normalizePluginsConfig(cfg.plugins);

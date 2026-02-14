@@ -33,6 +33,7 @@ let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
 // Use var to avoid TDZ when init runs across circular imports during bootstrap.
 var restoreAttempted = false;
+const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 
 /**
  * 持久化保存子代理运行记录(转发)
@@ -70,7 +71,6 @@ function resumeSubagentRun(runId: string) {
   if (!entry) {
     return;
   }
-  
   if (entry.cleanupCompletedAt) {
     return;
   }
@@ -80,9 +80,8 @@ function resumeSubagentRun(runId: string) {
     if (!beginSubagentCleanup(runId)) {
       return;
     }
-    
     const requesterOrigin = normalizeDeliveryContext(entry.requesterOrigin);
-    
+
     // 异步执行子代理通知流程
     void runSubagentAnnounceFlow({
       childSessionKey: entry.childSessionKey,
@@ -91,7 +90,7 @@ function resumeSubagentRun(runId: string) {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
-      timeoutMs: 30_000, // 30秒超时
+      timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,// 120秒超时
       cleanup: entry.cleanup,
       waitForCompletion: false,
       startedAt: entry.startedAt,
@@ -101,14 +100,14 @@ function resumeSubagentRun(runId: string) {
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(runId, entry.cleanup, didAnnounce);
     });
-    
+
     // 标记该运行已经恢复，避免重复处理
     resumedRuns.add(runId);
     return;
   }
 
+  // Wait for completion again after restart.
   // 情况2：运行尚未结束，需要在重启后重新等待完成
-
   const cfg = loadConfig();
   const waitTimeoutMs = resolveSubagentWaitTimeoutMs(cfg, undefined);
   void waitForSubagentCompletion(runId, waitTimeoutMs);
@@ -145,13 +144,12 @@ function restoreSubagentRunsOnce() {
       }
     }
 
-
+    // Resume pending work.
+    //恢复中断
     ensureListener();
     if ([...subagentRuns.values()].some((entry) => entry.archiveAtMs)) {
       startSweeper();
     }
-    // Resume pending work.
-    //恢复中断
     for (const runId of subagentRuns.keys()) {
       resumeSubagentRun(runId);
     }
@@ -237,67 +235,52 @@ function ensureListener() {
     return;
   }
   listenerStarted = true;
-  
+
   // 注册代理事件监听器，返回的 stop 函数可用于后续取消监听
   listenerStop = onAgentEvent((evt) => {
     // 忽略无效事件或非生命周期事件
     if (!evt || evt.stream !== "lifecycle") {
       return;
     }
-    
     const entry = subagentRuns.get(evt.runId);
     if (!entry) {
       return;
     }
-    
     // 获取事件阶段（start/end/error）
     const phase = evt.data?.phase;
-    
     if (phase === "start") {
       // 记录开始时间，确保数据类型为数字
-      const startedAt = typeof evt.data?.startedAt === "number" 
-        ? evt.data.startedAt 
-        : undefined;
-      
+      const startedAt = typeof evt.data?.startedAt === "number" ? evt.data.startedAt : undefined;
       if (startedAt) {
         entry.startedAt = startedAt;
         persistSubagentRuns(); // 保存子代理
       }
       return;
     }
-    
     // 只处理结束或错误事件，忽略其他阶段
     if (phase !== "end" && phase !== "error") {
       return;
     }
-    
     // 记录结束时间
-    const endedAt = typeof evt.data?.endedAt === "number" 
-      ? evt.data.endedAt 
-      : Date.now();
-    
+    const endedAt = typeof evt.data?.endedAt === "number" ? evt.data.endedAt : Date.now();
     entry.endedAt = endedAt;
-    
     if (phase === "error") {
-      const error = typeof evt.data?.error === "string" 
-        ? evt.data.error 
-        : undefined;
+      const error = typeof evt.data?.error === "string" ? evt.data.error : undefined;
       entry.outcome = { status: "error", error };
+    } else if (evt.data?.aborted) {
+      entry.outcome = { status: "timeout" };
     } else {
       entry.outcome = { status: "ok" };
     }
-    
     // 更新持久化存储
     persistSubagentRuns();
-    
+
     // 开始清理流程，如果清理未开始则返回
     if (!beginSubagentCleanup(evt.runId)) {
       return;
     }
-    
     // 规范化请求来源信息
     const requesterOrigin = normalizeDeliveryContext(entry.requesterOrigin);
-    
     // 异步执行结果通知流程
     void runSubagentAnnounceFlow({
       childSessionKey: entry.childSessionKey,
@@ -306,7 +289,7 @@ function ensureListener() {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
-      timeoutMs: 30_000, // 30秒超时
+      timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS, // 120秒超时
       cleanup: entry.cleanup,
       waitForCompletion: false, // 不等待完成
       startedAt: entry.startedAt,
@@ -325,15 +308,15 @@ function finalizeSubagentCleanup(runId: string, cleanup: "delete" | "keep", didA
   if (!entry) {
     return;
   }
-  if (cleanup === "delete") {
-    subagentRuns.delete(runId);
+  if (!didAnnounce) {
+    // Allow retry on the next wake if announce was deferred or failed.
+    // 若announce失败，则允许在下次唤醒时重试。
+    entry.cleanupHandled = false;
     persistSubagentRuns();
     return;
   }
-  if (!didAnnounce) {
-    // Allow retry on the next wake if the announce failed.
-    // 若announce失败，则允许在下次唤醒时重试。
-    entry.cleanupHandled = false;
+  if (cleanup === "delete") {
+    subagentRuns.delete(runId);
     persistSubagentRuns();
     return;
   }
@@ -414,7 +397,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       },
       timeoutMs: timeoutMs + 10_000,
     });
-    if (wait?.status !== "ok" && wait?.status !== "error") {
+    if (wait?.status !== "ok" && wait?.status !== "error" && wait?.status !== "timeout") {
       return;
     }
     const entry = subagentRuns.get(runId);
@@ -436,7 +419,11 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
     }
     const waitError = typeof wait.error === "string" ? wait.error : undefined;
     entry.outcome =
-      wait.status === "error" ? { status: "error", error: waitError } : { status: "ok" };
+      wait.status === "error"
+        ? { status: "error", error: waitError }
+        : wait.status === "timeout"
+          ? { status: "timeout" }
+          : { status: "ok" };
     mutated = true;
     if (mutated) {
       persistSubagentRuns();
@@ -452,7 +439,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
-      timeoutMs: 30_000,
+      timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
       startedAt: entry.startedAt,
@@ -467,7 +454,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
   }
 }
 
-export function resetSubagentRegistryForTests() {
+export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   subagentRuns.clear();
   resumedRuns.clear();
   stopSweeper();
@@ -477,7 +464,9 @@ export function resetSubagentRegistryForTests() {
     listenerStop = null;
   }
   listenerStarted = false;
-  persistSubagentRuns();
+  if (opts?.persist !== false) {
+    persistSubagentRuns();
+  }
 }
 
 export function addSubagentRunForTests(entry: SubagentRunRecord) {

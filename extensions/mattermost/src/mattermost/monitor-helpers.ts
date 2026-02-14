@@ -66,7 +66,7 @@ export function createDedupeCache(options: { ttlMs: number; maxSize: number }): 
       return;
     }
     while (cache.size > maxSize) {
-      const oldestKey = cache.keys().next().value;
+      const oldestKey = cache.keys().next().value as string | undefined;
       if (!oldestKey) {
         break;
       }
