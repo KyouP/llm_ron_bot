@@ -1,6 +1,6 @@
 export const enum CommandLane {
   Main = "main",
-  Cron = "cron",
+  Cron = "cron",      //定时调度
   Subagent = "subagent",
-  Nested = "nested",
+  Nested = "nested",  //嵌套任务
 }

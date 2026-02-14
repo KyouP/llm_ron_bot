@@ -2,6 +2,10 @@ import type { loadConfig } from "../config/config.js";
 import type { GatewayRequestHandler } from "./server-methods/types.js";
 import { loadOpenClawPlugins } from "../plugins/loader.js";
 
+/** 加载网关插件(通过openclaw插件配置)
+ * @param params 
+ * @returns 
+ */
 export function loadGatewayPlugins(params: {
   cfg: ReturnType<typeof loadConfig>;
   workspaceDir: string;

@@ -71,6 +71,11 @@ const resolvePluginSdkAlias = (): string | null => {
   return null;
 };
 
+/**
+ * 构建缓存Key
+ * @param params 
+ * @returns 
+ */
 function buildCacheKey(params: {
   workspaceDir?: string;
   plugins: NormalizedPluginsConfig;
@@ -164,6 +169,10 @@ function pushDiagnostics(diagnostics: PluginDiagnostic[], append: PluginDiagnost
   diagnostics.push(...append);
 }
 
+/** 加载 OpenClaw 插件
+ * @param options 
+ * @returns 
+ */
 export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegistry {
   const cfg = options.config ?? {};
   const logger = options.logger ?? defaultLogger();

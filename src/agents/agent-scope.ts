@@ -31,6 +31,11 @@ type ResolvedAgentConfig = {
 
 let defaultAgentWarned = false;
 
+/**
+ * 获取配置中有效的代理列表
+ * @param cfg 
+ * @returns 
+ */
 function listAgents(cfg: OpenClawConfig): AgentEntry[] {
   const list = cfg.agents?.list;
   if (!Array.isArray(list)) {
@@ -39,6 +44,11 @@ function listAgents(cfg: OpenClawConfig): AgentEntry[] {
   return list.filter((entry): entry is AgentEntry => Boolean(entry && typeof entry === "object"));
 }
 
+/**
+ * 列出所有配置的代理ID,并标准化处理，如果没有配置则返回默认ID"main"
+ * @param cfg 
+ * @returns 
+ */
 export function listAgentIds(cfg: OpenClawConfig): string[] {
   const agents = listAgents(cfg);
   if (agents.length === 0) {
@@ -57,6 +67,11 @@ export function listAgentIds(cfg: OpenClawConfig): string[] {
   return ids.length > 0 ? ids : [DEFAULT_AGENT_ID];
 }
 
+/**
+ * 规范化处理默认代理ID
+ * @param cfg 
+ * @returns 
+ */
 export function resolveDefaultAgentId(cfg: OpenClawConfig): string {
   const agents = listAgents(cfg);
   if (agents.length === 0) {
@@ -90,11 +105,23 @@ export function resolveSessionAgentId(params: {
   return resolveSessionAgentIds(params).sessionAgentId;
 }
 
+/**
+ * 规范化指定Agent ID
+ * @param cfg 
+ * @param agentId 
+ * @returns 
+ */
 function resolveAgentEntry(cfg: OpenClawConfig, agentId: string): AgentEntry | undefined {
   const id = normalizeAgentId(agentId);
   return listAgents(cfg).find((entry) => normalizeAgentId(entry.id) === id);
 }
 
+/**
+ * 返回代理配置 TODO serve配置信息
+ * @param cfg 
+ * @param agentId 
+ * @returns 
+ */
 export function resolveAgentConfig(
   cfg: OpenClawConfig,
   agentId: string,
@@ -135,6 +162,12 @@ export function resolveAgentModelPrimary(cfg: OpenClawConfig, agentId: string): 
   return primary || undefined;
 }
 
+/**
+ * 解析读取Agent配置fallbacks相关信息
+ * @param cfg 
+ * @param agentId 
+ * @returns 
+ */
 export function resolveAgentModelFallbacksOverride(
   cfg: OpenClawConfig,
   agentId: string,
@@ -144,6 +177,7 @@ export function resolveAgentModelFallbacksOverride(
     return undefined;
   }
   // Important: treat an explicitly provided empty array as an override to disable global fallbacks.
+  //若明确提供空数组，则视为override，将禁用全局fallbacks。
   if (!Object.hasOwn(raw, "fallbacks")) {
     return undefined;
   }

@@ -64,6 +64,12 @@ async function generateSelfSignedCert(params: {
   );
 }
 
+/**
+ * 网关 TLS 运行时配置加载，端到端加密
+ * @param cfg 
+ * @param log 
+ * @returns 
+ */
 export async function loadGatewayTlsRuntime(
   cfg: GatewayTlsConfig | undefined,
   log?: { info?: (msg: string) => void; warn?: (msg: string) => void },

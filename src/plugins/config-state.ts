@@ -36,6 +36,11 @@ const normalizeSlotValue = (value: unknown): string | null | undefined => {
   return trimmed;
 };
 
+/**
+ *  规范化插件条目配置
+ * @param entries 
+ * @returns 
+ */
 const normalizePluginEntries = (entries: unknown): NormalizedPluginsConfig["entries"] => {
   if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
     return {};
@@ -58,6 +63,11 @@ const normalizePluginEntries = (entries: unknown): NormalizedPluginsConfig["entr
   return normalized;
 };
 
+/**
+ *  规范化插件配置,memory特殊处理
+ * @param config 
+ * @returns 
+ */
 export const normalizePluginsConfig = (
   config?: OpenClawConfig["plugins"],
 ): NormalizedPluginsConfig => {

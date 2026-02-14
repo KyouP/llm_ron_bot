@@ -9,11 +9,24 @@ import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from ".
 // instead, and only call `getChannelPlugin()` at execution boundaries.
 //
 // Channel plugins are registered by the plugin loader (extensions/ or configured paths).
+
+// 频道插件注册表（运行时）。
+//
+// 该模块特意设计为“重型”（插件可能导入频道监视器、网页登录等）。
+// 共享代码路径（回复流、命令鉴权、沙盒解释）应依赖于 `src/channels/dock.ts`，
+// 并仅在执行边界处调用 `getChannelPlugin()`。
+//
+// 频道插件由插件加载器注册（扩展目录或配置路径）。
 function listPluginChannels(): ChannelPlugin[] {
   const registry = requireActivePluginRegistry();
   return registry.channels.map((entry) => entry.plugin);
 }
 
+/**
+ * 去重频道插件
+ * @param channels 
+ * @returns 
+ */
 function dedupeChannels(channels: ChannelPlugin[]): ChannelPlugin[] {
   const seen = new Set<string>();
   const resolved: ChannelPlugin[] = [];

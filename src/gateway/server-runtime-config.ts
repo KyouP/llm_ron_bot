@@ -28,6 +28,10 @@ export type GatewayRuntimeConfig = {
   canvasHostEnabled: boolean;
 };
 
+/** 解析网关运行时配置 TODO gateway config
+ * @param params 
+ * @returns 
+ */
 export async function resolveGatewayRuntimeConfig(params: {
   cfg: ReturnType<typeof loadConfig>;
   port: number;

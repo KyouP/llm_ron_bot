@@ -58,6 +58,11 @@ export function resolveAgentIdFromSessionKey(sessionKey: string | undefined | nu
   return normalizeAgentId(parsed?.agentId ?? DEFAULT_AGENT_ID);
 }
 
+/**
+ * 标准化代理ID
+ * @param value 
+ * @returns 配置ID
+ */
 export function normalizeAgentId(value: string | undefined | null): string {
   const trimmed = (value ?? "").trim();
   if (!trimmed) {

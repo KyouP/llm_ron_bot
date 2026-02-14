@@ -100,42 +100,64 @@ export type GatewayServerOptions = {
    * - lan: 0.0.0.0
    * - tailnet: bind only to the Tailscale IPv4 address (100.64.0.0/10)
    * - auto: prefer loopback, else LAN
+   *
+   * 网关 WebSocket/HTTP 服务器的绑定地址策略。
+   * - loopback: 127.0.0.1
+   * - lan: 0.0.0.0
+   * - tailnet: 仅绑定到 Tailscale IPv4 地址 (100.64.0.0/10)
+   * - auto: 优先使用 loopback，否则 LAN
    */
   bind?: import("../config/config.js").GatewayBindMode;
   /**
    * Advanced override for the bind host, bypassing bind resolution.
    * Prefer `bind` unless you really need a specific address.
+   *
+   * 绑定主机的高级覆盖，绕过 bind 解析。
+   * 除非确实需要特定地址，否则优先使用 `bind`。
    */
   host?: string;
   /**
    * If false, do not serve the browser Control UI.
    * Default: config `gateway.controlUi.enabled` (or true when absent).
+   *
+   * 如果为 false，则不提供浏览器控制界面。
+   * 默认值：配置中的 `gateway.controlUi.enabled`（若不存在则为 true）。
    */
   controlUiEnabled?: boolean;
   /**
    * If false, do not serve `POST /v1/chat/completions`.
    * Default: config `gateway.http.endpoints.chatCompletions.enabled` (or false when absent).
+   *
+   * 如果为 false，则不提供 `POST /v1/chat/completions`。
+   * 默认值：配置中的 `gateway.http.endpoints.chatCompletions.enabled`（若不存在则为 false）。
    */
   openAiChatCompletionsEnabled?: boolean;
   /**
    * If false, do not serve `POST /v1/responses` (OpenResponses API).
    * Default: config `gateway.http.endpoints.responses.enabled` (or false when absent).
+   *
+   * 如果为 false，则不提供 `POST /v1/responses`（OpenResponses API）。
+   * 默认值：配置中的 `gateway.http.endpoints.responses.enabled`（若不存在则为 false）。
    */
   openResponsesEnabled?: boolean;
   /**
    * Override gateway auth configuration (merges with config).
+   * 覆盖网关认证配置（与配置合并）。
    */
   auth?: import("../config/config.js").GatewayAuthConfig;
   /**
    * Override gateway Tailscale exposure configuration (merges with config).
+   * 覆盖网关 Tailscale 暴露配置（与配置合并）。
    */
   tailscale?: import("../config/config.js").GatewayTailscaleConfig;
   /**
    * Test-only: allow canvas host startup even when NODE_ENV/VITEST would disable it.
+   * 仅限测试：即使 NODE_ENV/VITEST 会禁用它，也允许canvas host启动。
    */
   allowCanvasHostInTests?: boolean;
   /**
    * Test-only: override the onboarding wizard runner.
+   * 仅限测试：覆盖入门向导运行器。
    */
   wizardRunner?: (
     opts: import("../commands/onboard-types.js").OnboardOptions,
@@ -149,6 +171,7 @@ export async function startGatewayServer(
   opts: GatewayServerOptions = {},
 ): Promise<GatewayServer> {
   // Ensure all default port derivations (browser/canvas) see the actual runtime port.
+  // 确保所有默认端口派生（浏览器/画布）都使用实际运行时端口。
   process.env.OPENCLAW_GATEWAY_PORT = String(port);
   logAcceptedEnvOption({
     key: "OPENCLAW_RAW_STREAM",
@@ -268,7 +291,7 @@ export async function startGatewayServer(
   const wizardRunner = opts.wizardRunner ?? runOnboardingWizard;
   const { wizardSessions, findRunningWizard, purgeWizardSession } = createWizardSessionTracker();
 
-  const deps = createDefaultDeps();
+  const deps = createDefaultDeps(); //TODO dependences? 似乎用不到
   let canvasHostServer: CanvasHostServer | null = null;
   const gatewayTls = await loadGatewayTlsRuntime(cfgAtStart.gateway?.tls, log.child("tls"));
   if (cfgAtStart.gateway?.tls?.enabled && !gatewayTls.enabled) {
@@ -327,6 +350,10 @@ export async function startGatewayServer(
   const nodeSubscribe = nodeSubscriptions.subscribe;
   const nodeUnsubscribe = nodeSubscriptions.unsubscribe;
   const nodeUnsubscribeAll = nodeSubscriptions.unsubscribeAll;
+  /**
+   * voicewake.changed事件广播
+   * @param triggers 
+   */
   const broadcastVoiceWakeChanged = (triggers: string[]) => {
     broadcast("voicewake.changed", { triggers }, { dropIfSlow: true });
   };
@@ -368,8 +395,11 @@ export async function startGatewayServer(
   // Debounce skills-triggered node probes to avoid feedback loops and rapid-fire invokes.
   // Skills changes can happen in bursts (e.g., file watcher events), and each probe
   // takes time to complete. A 30-second delay ensures we batch changes together.
+  // 对技能触发的节点探测进行去抖处理，以避免反馈循环和快速连续调用。
+  // 技能变更可能突发发生（例如文件监视器事件），而每次探测都需要时间完成。
+  // 30秒的延迟确保我们将变更批量处理。
   let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  const skillsRefreshDelayMs = 30_000;
+  const skillsRefreshDelayMs = 30_000; //TODO skills刷新延迟，30秒
   const skillsChangeUnsub = registerSkillsChangeListener((event) => {
     if (event.reason === "remote-node") {
       return;

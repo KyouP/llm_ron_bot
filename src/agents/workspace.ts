@@ -6,6 +6,12 @@ import { isSubagentSessionKey } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
 
+/**
+ * 解析默认代理工作空间目录 {homedir}/.openclaw/workspace[-profile]
+ * @param env 
+ * @param homedir 
+ * @returns 
+ */
 export function resolveDefaultAgentWorkspaceDir(
   env: NodeJS.ProcessEnv = process.env,
   homedir: () => string = os.homedir,

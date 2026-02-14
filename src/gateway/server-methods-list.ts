@@ -1,5 +1,6 @@
 import { listChannelPlugins } from "../channels/plugins/index.js";
 
+// TODO 基础网关方法列表
 const BASE_METHODS = [
   "health",
   "logs.tail",
@@ -84,6 +85,7 @@ const BASE_METHODS = [
   "chat.send",
 ];
 
+/** 列出所有可用的网关方法，包括基础方法和频道插件方法 */
 export function listGatewayMethods(): string[] {
   const channelMethods = listChannelPlugins().flatMap((plugin) => plugin.gatewayMethods ?? []);
   return Array.from(new Set([...BASE_METHODS, ...channelMethods]));

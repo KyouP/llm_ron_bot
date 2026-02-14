@@ -245,6 +245,12 @@ export function resolveUserPath(input: string): string {
   return path.resolve(trimmed);
 }
 
+/**
+ * 解析配置目录 {homedir}/.openclaw
+ * @param env 
+ * @param homedir 
+ * @returns 
+ */
 export function resolveConfigDir(
   env: NodeJS.ProcessEnv = process.env,
   homedir: () => string = os.homedir,
