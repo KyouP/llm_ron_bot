@@ -25,7 +25,7 @@ describe("loginChutes", () => {
     const redirectUri = `http://127.0.0.1:${port}/oauth-callback`;
 
     const fetchFn: typeof fetch = async (input, init) => {
-      const url = String(input);
+      const url = JSON.stringify(input);
       if (url === CHUTES_TOKEN_ENDPOINT) {
         return new Response(
           JSON.stringify({
@@ -68,7 +68,7 @@ describe("loginChutes", () => {
 
   it("supports manual flow with pasted code", async () => {
     const fetchFn: typeof fetch = async (input) => {
-      const url = String(input);
+      const url = JSON.stringify(input);
       if (url === CHUTES_TOKEN_ENDPOINT) {
         return new Response(
           JSON.stringify({
@@ -107,7 +107,7 @@ describe("loginChutes", () => {
 
   it("does not reuse code_verifier as state", async () => {
     const fetchFn: typeof fetch = async (input) => {
-      const url = String(input);
+      const url = JSON.stringify(input);
       if (url === CHUTES_TOKEN_ENDPOINT) {
         return new Response(
           JSON.stringify({

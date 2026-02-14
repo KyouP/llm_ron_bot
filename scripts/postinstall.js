@@ -49,7 +49,7 @@ function ensureExecutable(targetPath) {
     }
     fs.chmodSync(targetPath, 0o755);
   } catch (err) {
-    console.warn(`[postinstall] chmod failed: ${err}`);
+    console.warn(`[postinstall] chmod failed: ${String(err)}`);
   }
 }
 

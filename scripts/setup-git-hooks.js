@@ -33,7 +33,7 @@ function ensureExecutable(targetPath) {
     }
     fs.chmodSync(targetPath, 0o755);
   } catch (err) {
-    console.warn(`[setup-git-hooks] chmod failed: ${err}`);
+    console.warn(`[setup-git-hooks] chmod failed: ${String(err)}`);
   }
 }
 
